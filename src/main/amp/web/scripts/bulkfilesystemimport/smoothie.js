@@ -63,7 +63,7 @@
  * v1.19: Avoid unnecessary repaints, and fixed flicker in old browsers having multiple charts in document (#40), by @asbai
  */
 
-;(function(exports) {
+(function(exports) {
 
   var Util = {
     extend: function() {

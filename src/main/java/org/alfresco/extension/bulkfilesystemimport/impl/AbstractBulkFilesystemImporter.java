@@ -28,22 +28,25 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
+import java.lang.reflect.Method;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.lang.SystemUtils;
-
 import org.alfresco.model.ContentModel;
 import org.alfresco.repo.content.ContentStore;
 import org.alfresco.repo.content.encoding.ContentCharsetFinder;
 import org.alfresco.repo.content.filestore.FileContentStore;
 import org.alfresco.repo.policy.BehaviourFilter;
 import org.alfresco.repo.tenant.AbstractTenantRoutingContentStore;
+import org.alfresco.repo.tenant.TenantRoutingContentStore;
 import org.alfresco.repo.transaction.RetryingTransactionHelper;
 import org.alfresco.repo.transaction.RetryingTransactionHelper.RetryingTransactionCallback;
 import org.alfresco.repo.version.VersionModel;
@@ -53,12 +56,14 @@ import org.alfresco.service.cmr.model.FileFolderService;
 import org.alfresco.service.cmr.model.FileInfo;
 import org.alfresco.service.cmr.model.FileNotFoundException;
 import org.alfresco.service.cmr.repository.ContentData;
+import org.alfresco.service.cmr.repository.ContentReader;
 import org.alfresco.service.cmr.repository.ContentService;
 import org.alfresco.service.cmr.repository.ContentWriter;
 import org.alfresco.service.cmr.repository.InvalidNodeRefException;
 import org.alfresco.service.cmr.repository.MimetypeService;
 import org.alfresco.service.cmr.repository.NodeRef;
 import org.alfresco.service.cmr.repository.NodeService;
+import org.alfresco.service.cmr.repository.StoreRef;
 import org.alfresco.service.cmr.security.AccessStatus;
 import org.alfresco.service.cmr.security.PermissionService;
 import org.alfresco.service.cmr.version.VersionService;
@@ -74,6 +79,8 @@ import org.alfresco.extension.bulkfilesystemimport.MetadataLoader;
 import org.alfresco.extension.bulkfilesystemimport.ImportFilter;
 import org.alfresco.extension.bulkfilesystemimport.impl.BulkImportStatusImpl.NodeState;
 import org.alfresco.extension.bulkfilesystemimport.util.DataDictionaryBuilder;
+import org.springframework.aop.Advisor;
+import org.springframework.aop.support.AopUtils;
 
 
 /**
@@ -189,29 +196,51 @@ public abstract class AbstractBulkFilesystemImporter
     
     /**
      * Determines whether the given file is located in the given file content store.
-     * @param fileContentStore The file content store to check <i>(must not be null)</i>.
+     * Changing to ContentStore as runtime type is masked by proxy.
+     * @param configuredContentStore The file content store to check <i>(must not be null)</i>.
      * @param source           The file to check <i>(must not be null)</i>.
      * @return True if the given file is in an Alfresco managed content store, false otherwise.
      */
-    private final boolean isInContentStore(final FileContentStore fileContentStore, final File source)
+    private final boolean isInContentStore(final ContentStore configuredContentStore, final File source)
     {
-        boolean result            = false;
-        String  storeRootLocation = fileContentStore.getRootLocation();
+        String  storeRootLocation = configuredContentStore.getRootLocation();
         String  sourcePath        = source.getAbsolutePath();   // Note: we don't use getCanonicalPath here because it dereferences symlinks (which we don't want)
-        
-        // Case insensitive comparison on Windows
-        if (SystemUtils.IS_OS_WINDOWS)
+        return isInContentStore(storeRootLocation, sourcePath);
+    }
+
+    /**
+     * 
+     * @param rootLocation
+     * @param absSourcePath
+     * @return
+     */
+    private final boolean isInContentStore(final String rootLocation, final String absSourcePath) {
+    	boolean result            = false;
+    	// Case insensitive comparison on Windows
+    	if (SystemUtils.IS_OS_WINDOWS)
         {
-            result = sourcePath.toLowerCase().startsWith(storeRootLocation.toLowerCase());
+            result = absSourcePath.toLowerCase().startsWith(validatePath(rootLocation).toLowerCase());
         }
         else
         {
-            result = sourcePath.startsWith(storeRootLocation);
+            result = absSourcePath.startsWith(validatePath(rootLocation));
         }
         
-        return(result);
+    	return (result);
     }
+    
+    /**
+     * If the path is an absolute path, then good; otherwise determine the absolute path.
+     * @return
+     */
+    private String validatePath(String path) {
+    		File file = new File(path);
+    		if (file.isAbsolute())
+    			return path;
+    		 final String dir = System.getProperty("user.dir");
+    	return dir+ File.separator +path;
 
+    }
 
     /**
      * Determines whether the given file is already located in an Alfresco managed content store.  Used to determine
@@ -223,16 +252,9 @@ public abstract class AbstractBulkFilesystemImporter
     private final boolean isInContentStore(final File source)
     {
         boolean result = false;
-
-        if (configuredContentStore instanceof FileContentStore)
-        {
-            result = isInContentStore((FileContentStore)configuredContentStore, source);
-        }
-        // It's a shame org.alfresco.repo.content.AbstractRoutingContentStore.getAllStores() is protected - that limits the applicability of this solution 
-        else if (configuredContentStore instanceof AbstractTenantRoutingContentStore)
-        {
-            List<ContentStore> backingStores = ((AbstractTenantRoutingContentStore)configuredContentStore).getAllStores();
-            
+        //Class types appears to be hidden behind spring proxy class, which prevents inplace import from working.
+        if (configuredContentStore instanceof AbstractTenantRoutingContentStore) {
+    		List<ContentStore> backingStores = ((AbstractTenantRoutingContentStore) configuredContentStore).getAllStores();
             if (backingStores != null)
             {
                 for (final ContentStore store : backingStores)
@@ -241,14 +263,16 @@ public abstract class AbstractBulkFilesystemImporter
                     {
                         if (isInContentStore((FileContentStore)store, source))
                         {
-                            result = true;
-                            break;
+                            return true;
+                            
                         }
                     }
                 }
-            }
+            } 
+    	
+        } else {
+        	return isInContentStore(configuredContentStore, source);
         }
-
         return(result);
     }
 
